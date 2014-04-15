@@ -1,0 +1,97 @@
+#!/usr/bin/env ruby
+
+# query Redis for checks that we have detected have failed, but haven't yet sent a notification.
+
+require 'optparse'
+require 'ostruct'
+
+require 'oj'
+Oj.default_options = { :indent => 0, :mode => :strict }
+
+require 'redis'
+
+# add lib to the default include path
+unless $:.include?(File.dirname(__FILE__) + '/../lib/')
+  $: << File.dirname(__FILE__) + '/../lib'
+end
+
+require 'flapjack/configuration'
+require 'flapjack/data/entity_check'
+
+options = OpenStruct.new
+options.config = Flapjack::Configuration::DEFAULT_CONFIG_PATH
+
+exe = File.basename(__FILE__)
+
+optparse = OptionParser.new do |opts|
+  opts.banner = "Usage: #{exe} COMMAND [OPTIONS]"
+
+  opts.separator  ""
+  opts.separator  "Commands:"
+  opts.separator  "     detect"
+  opts.separator  ""
+  opts.separator  "Options"
+
+  opts.on("-c", "--config [PATH]", String, "PATH to the config file to use") do |c|
+    options.config = c
+  end
+
+end
+optparse.parse!(ARGV)
+
+bail_with_usage = proc do |message|
+  puts message
+  puts "\n#{optparse}"
+  exit(false)
+end
+
+if options.help
+  puts optparse
+  exit
+elsif options.version
+  puts Flapjack::VERSION
+  exit
+elsif !["detect"].include?(ARGV[0])
+  message = if ARGV.nil? || ARGV.empty?
+              "No command provided"
+            else
+              "Unknown command provided: '#{ARGV[0]}'"
+            end
+  bail_with_usage.call message
+end
+
+FLAPJACK_ENV = ENV['FLAPJACK_ENV'] || 'production'
+
+config = Flapjack::Configuration.new
+config.load(options.config)
+config_env = config.all
+redis_options = config.for_redis
+
+if config_env.nil? || config_env.empty?
+  puts "No config data for environment '#{FLAPJACK_ENV}' found in '#{options.config}'"
+  exit(false)
+end
+
+case ARGV[0]
+when "detect"
+  @redis = Redis.new(redis_options)
+  failings = Flapjack::Data::EntityCheck.find_all_failing(:redis => @redis)
+  puts "failings count: #{failings.length}"
+  puts "#{failings.inspect}"
+  unnotified = failings.inject({}) do |memo, failing|
+    print "Failing Check: #{failing.inspect}"
+    check = Flapjack::Data::EntityCheck.for_event_id(failing, :redis => @redis)
+    max_notified = check.max_notified_severity_of_current_failure
+    puts " [#{max_notified}]"
+    puts "   state:       #{check.state}"
+    puts "   last_update: #{Time.at(check.last_update)}"
+    puts "   enabled?:    #{check.enabled?}"
+    puts "   last notifications: #{check.last_notifications_of_each_type.inspect}"
+    # if max_notified
+    #   memo
+  end
+
+else
+  bail_with_usage.call "You need to give me something to do, eg. a command like 'import-entities', 'import-clients', etc."
+end
+
