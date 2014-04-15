@@ -4,6 +4,7 @@
 
 require 'optparse'
 require 'ostruct'
+require 'terminal-table'
 
 require 'oj'
 Oj.default_options = { :indent => 0, :mode => :strict }
@@ -72,26 +73,39 @@ if config_env.nil? || config_env.empty?
   exit(false)
 end
 
+@redis = Redis.new(redis_options)
+
 case ARGV[0]
 when "detect"
-  @redis = Redis.new(redis_options)
   failings = Flapjack::Data::EntityCheck.find_all_failing(:redis => @redis)
-  puts "failings count: #{failings.length}"
-  puts "#{failings.inspect}"
-  unnotified = failings.inject({}) do |memo, failing|
-    print "Failing Check: #{failing.inspect}"
+  total_failing_checks = failings.length
+  unnotified = failings.inject([]) do |memo, failing|
     check = Flapjack::Data::EntityCheck.for_event_id(failing, :redis => @redis)
     max_notified = check.max_notified_severity_of_current_failure
-    puts " [#{max_notified}]"
-    puts "   state:       #{check.state}"
-    puts "   last_update: #{Time.at(check.last_update)}"
-    puts "   enabled?:    #{check.enabled?}"
-    puts "   last notifications: #{check.last_notifications_of_each_type.inspect}"
-    # if max_notified
-    #   memo
+    unless max_notified || check.in_scheduled_maintenance? || check.in_unscheduled_maintenance?
+      memo << check
+    end
+    memo
+  end
+
+  if unnotified.empty?
+    puts "Great! There's no unnotified failures to be found."
+    puts "Total failing checks: #{total_failing_checks}"
+  else
+    puts "#{unnotified.length} unnotified failures found:"
+    headings = ["Entity", "Check", "State", "Last Update", "Enablement"]
+    rows = []
+    unnotified.each {|check|
+      enablement = check.enabled? ? 'Enabled' : 'Disabled'
+      rows << [check.entity.name, check.check, check.state, Time.at(check.last_update).to_s, enablement]
+    }
+    table = Terminal::Table.new :headings => headings, :rows => rows
+    puts table
+    puts "Total failing checks: #{total_failing_checks}"
   end
 
 else
   bail_with_usage.call "You need to give me something to do, eg. a command like 'import-entities', 'import-clients', etc."
 end
+
 
